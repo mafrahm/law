@@ -491,6 +491,13 @@ class SiblingFileCollectionBase(FileCollection):
             return False
         return target.basename in basenames
 
+    def _get_exists_func(
+        self,
+        optional_existing: bool | NoValue | None,
+        basenames: Any = None,
+    ) -> Callable[[Target], bool]:
+        raise NotImplementedError
+
     def remove(self, *, silent: bool = True, threads: int | None = None, **kwargs) -> bool:
         if threads is None:
             threads = self.remove_threads
@@ -499,10 +506,13 @@ class SiblingFileCollectionBase(FileCollection):
         def remove(target):
             return target.remove(silent=silent, **kwargs)
 
-        # target generator
+        # target generator, checking the existence per target rather than per element since elements
+        # might be only partially existing, and nested collections handle partial removal themselves
         def target_gen():
-            for targets in self.iter_existing(unpack=False):
-                yield from targets
+            exists_func = self._get_exists_func(optional_existing=None)
+            for target in self._flat_target_list:
+                if isinstance(target, TargetCollection) or exists_func(target):
+                    yield target
 
         # parallel or sequential removal
         removed_any = False
@@ -594,18 +604,7 @@ class SiblingFileCollection(SiblingFileCollectionBase):
         # default helper to check for existence
         check_existing = existing is not None or state
         if exists_func is None and check_existing:
-            # get all basenames
-            if basenames is None:
-                basenames = self.dir.listdir() if self.dir.exists() else []
-            # convert to set for faster lookup
-            basenames = set(basenames) if basenames else set()
-
-            exists_func = functools.partial(
-                self._exists_in_basenames,
-                basenames=basenames,
-                optional_existing=optional_existing,
-                target_dirs=None,
-            )
+            exists_func = self._get_exists_func(optional_existing, basenames)
 
         # loop and yield
         for key, targets in self._iter_flat():
@@ -619,6 +618,24 @@ class SiblingFileCollection(SiblingFileCollectionBase):
                 if state:
                     obj = (*obj, exists)  # type: ignore[assignment]
                 yield obj[0] if len(obj) == 1 else obj
+
+    def _get_exists_func(
+        self,
+        optional_existing: bool | NoValue | None,
+        basenames: Sequence[str] | set[str] | None = None,
+    ) -> Callable[[Target], bool]:
+        # get all basenames
+        if basenames is None:
+            basenames = self.dir.listdir() if self.dir.exists() else []
+        # convert to set for faster lookup
+        basenames = set(basenames) if basenames else set()
+
+        return functools.partial(
+            self._exists_in_basenames,
+            basenames=basenames,
+            optional_existing=optional_existing,
+            target_dirs=None,
+        )
 
     def _exists_fwd(self, **kwargs) -> bool:
         fwd = ["optional_existing", "basenames", "exists_func"]
@@ -678,21 +695,7 @@ class NestedSiblingFileCollection(SiblingFileCollectionBase):
         # default helper to check for existence
         check_existing = existing is not None or state
         if exists_func is None and check_existing:
-            # get all basenames
-            if basenames is None:
-                basenames = {
-                    col.dir.abspath: (col.dir.listdir() if col.dir.exists() else [])
-                    for col in self.collections
-                }
-            # convert to sets for faster lookups
-            basenames = {k: (set(v) if v else set()) for k, v in basenames.items()}
-
-            exists_func = functools.partial(
-                self._exists_in_basenames,
-                basenames=basenames,  # type: ignore[arg-type]
-                optional_existing=optional_existing,
-                target_dirs=self._flat_target_dirs,
-            )
+            exists_func = self._get_exists_func(optional_existing, basenames)
 
         # loop and yield
         for key, targets in self._iter_flat():
@@ -706,6 +709,27 @@ class NestedSiblingFileCollection(SiblingFileCollectionBase):
                 if state:
                     obj = (*obj, exists)  # type: ignore[assignment]
                 yield obj[0] if len(obj) == 1 else obj
+
+    def _get_exists_func(
+        self,
+        optional_existing: bool | NoValue | None,
+        basenames: dict[str, Sequence[str] | set[str]] | None = None,
+    ) -> Callable[[Target], bool]:
+        # get all basenames
+        if basenames is None:
+            basenames = {
+                col.dir.abspath: (col.dir.listdir() if col.dir.exists() else [])
+                for col in self.collections
+            }
+        # convert to sets for faster lookups
+        basenames = {k: (set(v) if v else set()) for k, v in basenames.items()}
+
+        return functools.partial(
+            self._exists_in_basenames,
+            basenames=basenames,  # type: ignore[arg-type]
+            optional_existing=optional_existing,
+            target_dirs=self._flat_target_dirs,
+        )
 
     def _exists_fwd(self, **kwargs) -> bool:
         fwd = ["optional_existing", "basenames", "exists_func"]
